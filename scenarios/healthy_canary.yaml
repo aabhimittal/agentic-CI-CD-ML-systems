@@ -1,0 +1,30 @@
+# A safety-critical model update that is genuinely healthy.
+# High criticality → the agent chooses a graduated canary; the candidate is a
+# small improvement, so every gate promotes and the rollout completes.
+service: grasp-planner
+model_version: grasp-net:v2.3.0
+previous_version: grasp-net:v2.2.1
+fleet_size: 60
+task_criticality: 0.8
+change_summary: "retrained grasp policy on expanded SKU set; minor accuracy gain"
+seed: 7
+
+thresholds:
+  max_error_rate: 0.05
+  max_latency_p99_ms: 500
+  min_task_success_rate: 0.90
+  max_cycle_time_s: 12.0
+  max_safety_incidents: 0
+
+behavior:
+  base_error_rate: 0.010
+  base_latency_p99_ms: 180
+  base_task_success_rate: 0.980
+  base_cycle_time_s: 8.0
+  # Candidate is slightly better across the board.
+  cand_error_rate: 0.008
+  cand_latency_p99_ms: 175
+  cand_task_success_rate: 0.990
+  cand_cycle_time_s: 7.8
+  cand_safety_rate: 0.0
+  noise: 0.01

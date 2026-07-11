@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-deploy"
+version = "0.1.0"
+description = "Agent-driven CI/CD for ML + Robotics: deployments as decision trees, not scripts."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Abhishek Mittal" }]
+keywords = ["cicd", "mlops", "robotics", "kubernetes", "step-functions", "canary", "agent"]
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# The agent talks to Claude when available; everything runs without these.
+llm = ["anthropic>=0.40"]
+pretty = ["rich>=13.0"]
+metrics = ["prometheus-client>=0.20"]
+dev = ["pytest>=7.0"]
+all = ["anthropic>=0.40", "rich>=13.0", "prometheus-client>=0.20", "pytest>=7.0"]
+
+[project.scripts]
+agentic-deploy = "agentic_deploy.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/aabhimittal/agentic-ci-cd-ml-systems"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+agentic_deploy = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

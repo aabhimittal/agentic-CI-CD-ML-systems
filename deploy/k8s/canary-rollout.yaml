@@ -1,0 +1,81 @@
+# Argo Rollouts CR expressing the canary traffic steps the agent plans.
+# The agentic engine drives these weights dynamically; this manifest is the
+# declarative equivalent for a GitOps controller to reconcile.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: grasp-planner
+  labels:
+    app: grasp-planner
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: grasp-planner
+  template:
+    metadata:
+      labels:
+        app: grasp-planner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: server
+          image: ghcr.io/aabhimittal/grasp-planner:candidate
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MODEL_VERSION
+              value: "grasp-net:v2.3.0"
+  strategy:
+    canary:
+      # Each pause is a promotion gate the decision tree evaluates before the
+      # next setWeight. An analysis failure triggers an automatic rollback.
+      steps:
+        - setWeight: 10
+        - pause: { duration: 30s }
+        - setWeight: 25
+        - pause: { duration: 30s }
+        - setWeight: 50
+        - pause: { duration: 30s }
+        - setWeight: 100
+      analysis:
+        templates:
+          - templateName: fleet-health-gate
+        startingStep: 1
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: fleet-health-gate
+spec:
+  # These queries mirror the guardrails encoded in the promotion decision tree.
+  metrics:
+    - name: robot-task-success-rate
+      interval: 30s
+      successCondition: result >= 0.90
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: >-
+            robot_task_success_rate{app="grasp-planner"}
+    - name: inference-error-rate
+      interval: 30s
+      successCondition: result <= 0.05
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: >-
+            inference_error_rate{app="grasp-planner"}
+    - name: safety-incidents
+      interval: 30s
+      successCondition: result == 0
+      failureLimit: 0
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: >-
+            robot_safety_incidents_total{app="grasp-planner"}

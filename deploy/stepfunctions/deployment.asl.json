@@ -1,0 +1,68 @@
+{
+  "Comment": "Agentic ML+Robotics deployment: plan a strategy, provision the green stack, then run a gated rollout loop. Each step observes fleet health and a decision tree returns promote/hold/rollback. Health guardrail breaches route to an atomic rollback; a clean run promotes the candidate.",
+  "StartAt": "PlanStrategy",
+  "States": {
+    "PlanStrategy": {
+      "Type": "Task",
+      "Resource": "plan_strategy",
+      "Comment": "Agent chooses canary vs blue/green and the traffic steps.",
+      "Next": "ProvisionGreen"
+    },
+    "ProvisionGreen": {
+      "Type": "Task",
+      "Resource": "provision",
+      "Comment": "Apply Service + baseline (blue) manifests; prepare the green stack.",
+      "Next": "RolloutStep"
+    },
+    "RolloutStep": {
+      "Type": "Task",
+      "Resource": "rollout_step",
+      "Comment": "Shift traffic for this step, observe health, and evaluate the decision tree.",
+      "Next": "EvaluateGate"
+    },
+    "EvaluateGate": {
+      "Type": "Choice",
+      "Comment": "Route on the decision-tree verdict for the current step.",
+      "Choices": [
+        {
+          "Variable": "$.verdict",
+          "StringEquals": "rollback",
+          "Next": "Rollback"
+        },
+        {
+          "Variable": "$.verdict",
+          "StringEquals": "hold",
+          "Next": "RolloutStep"
+        },
+        {
+          "And": [
+            { "Variable": "$.verdict", "StringEquals": "promote" },
+            { "Variable": "$.has_more_steps", "BooleanEquals": true }
+          ],
+          "Next": "RolloutStep"
+        }
+      ],
+      "Default": "Promote"
+    },
+    "Rollback": {
+      "Type": "Task",
+      "Resource": "rollback",
+      "Comment": "Revert all traffic to the baseline and have the agent explain why.",
+      "Next": "RolledBack"
+    },
+    "RolledBack": {
+      "Type": "Fail",
+      "Error": "HealthGuardrailBreached",
+      "Cause": "A fleet health signal breached its guardrail; candidate was rolled back."
+    },
+    "Promote": {
+      "Type": "Task",
+      "Resource": "promote",
+      "Comment": "Finalize: candidate becomes the new baseline.",
+      "Next": "Promoted"
+    },
+    "Promoted": {
+      "Type": "Succeed"
+    }
+  }
+}
