@@ -1,0 +1,9 @@
+# Core (required)
+PyYAML>=6.0
+
+# Optional — the project runs fully without these.
+# Install with `pip install -e .[all]` to enable the real Claude agent,
+# rich terminal output, and the prometheus_client exposition backend.
+# anthropic>=0.40
+# rich>=13.0
+# prometheus-client>=0.20

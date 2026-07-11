@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grasp-planner-blue
+  labels:
+    app: grasp-planner
+    color: blue
+    role: baseline
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: grasp-planner
+      color: blue
+  template:
+    metadata:
+      labels:
+        app: grasp-planner
+        color: blue
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: server
+          image: ghcr.io/aabhimittal/grasp-planner:baseline
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MODEL_VERSION
+              value: "grasp-net:v2.2.1"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"

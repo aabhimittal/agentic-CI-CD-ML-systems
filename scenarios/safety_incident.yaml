@@ -1,0 +1,33 @@
+# A latent safety bug: the candidate's service and task metrics look healthy, but
+# a safety-envelope violation only manifests once traffic reaches 50% (step 2).
+# The decision tree checks safety first, so the moment an incident appears the
+# rollout is aborted — even though every other signal is green.
+service: grasp-planner
+model_version: grasp-net:v2.4.0-rc1
+previous_version: grasp-net:v2.3.0
+fleet_size: 90
+task_criticality: 0.9
+change_summary: "new collision-avoidance head; retrained weights"
+seed: 5
+
+thresholds:
+  max_error_rate: 0.05
+  max_latency_p99_ms: 500
+  min_task_success_rate: 0.90
+  max_cycle_time_s: 12.0
+  max_safety_incidents: 0
+
+behavior:
+  base_error_rate: 0.010
+  base_latency_p99_ms: 180
+  base_task_success_rate: 0.980
+  base_cycle_time_s: 8.0
+  # Candidate looks healthy on every non-safety signal...
+  cand_error_rate: 0.012
+  cand_latency_p99_ms: 190
+  cand_task_success_rate: 0.985
+  cand_cycle_time_s: 8.1
+  # ...but has a latent safety fault that only fires from step 2 (50% traffic).
+  cand_safety_rate: 8.0
+  regression_activates_at_step: 2
+  noise: 0.01

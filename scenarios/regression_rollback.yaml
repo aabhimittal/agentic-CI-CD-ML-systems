@@ -1,0 +1,32 @@
+# A quality regression: the candidate drops robot task success and raises the
+# inference error rate. The blended metrics stay fine at low traffic, so early
+# canary steps promote — then the 50% gate crosses the task-success floor and the
+# decision tree rolls back before the whole fleet is affected.
+service: grasp-planner
+model_version: grasp-net:v3.0.0
+previous_version: grasp-net:v2.2.1
+fleet_size: 80
+task_criticality: 0.75
+change_summary: "major architecture change; retrained from scratch on new weights"
+seed: 11
+
+thresholds:
+  max_error_rate: 0.05
+  max_latency_p99_ms: 500
+  min_task_success_rate: 0.90
+  max_cycle_time_s: 12.0
+  max_safety_incidents: 0
+
+behavior:
+  base_error_rate: 0.010
+  base_latency_p99_ms: 180
+  base_task_success_rate: 0.980
+  base_cycle_time_s: 8.0
+  # Candidate regresses: lower success, higher error/latency.
+  cand_error_rate: 0.090
+  cand_latency_p99_ms: 320
+  cand_task_success_rate: 0.780
+  cand_cycle_time_s: 10.5
+  cand_safety_rate: 0.0
+  regression_activates_at_step: 0
+  noise: 0.01

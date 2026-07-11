@@ -1,0 +1,55 @@
+# Prometheus recording + alerting rules for the fleet health signals.
+# The metric names match those exposed by agentic_deploy.prometheus and queried
+# by the canary AnalysisTemplate and the promotion decision tree.
+groups:
+  - name: fleet-health.recording
+    interval: 30s
+    rules:
+      - record: fleet:inference_error_rate:ratio
+        expr: inference_error_rate{app="grasp-planner"}
+      - record: fleet:robot_task_success_rate:ratio
+        expr: robot_task_success_rate{app="grasp-planner"}
+      - record: fleet:robot_task_cycle_time:seconds
+        expr: robot_task_cycle_time_seconds{app="grasp-planner"}
+
+  - name: fleet-health.alerts
+    rules:
+      - alert: CandidateSafetyIncident
+        expr: increase(robot_safety_incidents_total{version!="baseline"}[1m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          action: rollback
+        annotations:
+          summary: "Safety-envelope violation on candidate model"
+          description: "Candidate {{ $labels.version }} produced a safety incident; roll back immediately."
+
+      - alert: CandidateTaskSuccessDrop
+        expr: robot_task_success_rate{version!="baseline"} < 0.90
+        for: 1m
+        labels:
+          severity: critical
+          action: rollback
+        annotations:
+          summary: "Robot task success below floor"
+          description: "Candidate {{ $labels.version }} task success {{ $value }} < 0.90."
+
+      - alert: CandidateErrorRateHigh
+        expr: inference_error_rate{version!="baseline"} > 0.05
+        for: 1m
+        labels:
+          severity: warning
+          action: rollback
+        annotations:
+          summary: "Inference error rate above guardrail"
+          description: "Candidate {{ $labels.version }} error rate {{ $value }} > 0.05."
+
+      - alert: CandidateLatencyHigh
+        expr: inference_latency_p99_ms{version!="baseline"} > 500
+        for: 2m
+        labels:
+          severity: warning
+          action: hold
+        annotations:
+          summary: "Inference p99 latency elevated"
+          description: "Candidate {{ $labels.version }} p99 {{ $value }}ms > 500ms."

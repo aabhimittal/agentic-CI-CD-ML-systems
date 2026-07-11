@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grasp-planner-green
+  labels:
+    app: grasp-planner
+    color: green
+    role: candidate
+spec:
+  # Scaled to 0 until the deployment engine stands the candidate up.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: grasp-planner
+      color: green
+  template:
+    metadata:
+      labels:
+        app: grasp-planner
+        color: green
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: server
+          image: ghcr.io/aabhimittal/grasp-planner:candidate
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MODEL_VERSION
+              value: "grasp-net:v2.3.0"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"

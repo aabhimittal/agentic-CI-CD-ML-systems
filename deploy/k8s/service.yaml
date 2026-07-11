@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: grasp-planner
+  labels:
+    app: grasp-planner
+spec:
+  # The active color is switched by the blue/green cut-over. For canary, an
+  # ingress/mesh weight (see canary-rollout.yaml) splits traffic across colors.
+  selector:
+    app: grasp-planner
+    color: blue
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
