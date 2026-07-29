@@ -51,6 +51,11 @@ pip install -e .            # core only (PyYAML). Add [all] for Claude + rich + 
 agentic-deploy run scenarios/healthy_canary.yaml       # → PROMOTED
 agentic-deploy run scenarios/regression_rollback.yaml  # → ROLLED_BACK (caught at 50%)
 agentic-deploy run scenarios/safety_incident.yaml      # → ROLLED_BACK (latent safety fault)
+agentic-deploy run scenarios/late_latent_soak.yaml     # → ROLLED_BACK (caught in soak/bake)
+agentic-deploy run scenarios/telemetry_dropout.yaml    # → ROLLED_BACK (fail-safe on lost telemetry)
+
+# Let the agent learn from history (plans get cautious after rollbacks):
+agentic-deploy run scenarios/healthy_canary.yaml --memory deploy-history.json
 
 # Inspect the promotion decision tree for a scenario:
 agentic-deploy tree scenarios/safety_incident.yaml
@@ -101,7 +106,11 @@ visited** and the **breached guardrails** — that trace *is* the explanation.
 
 The default tree encodes a safety-first ordering:
 
-1. **Safety incidents** — terminal. Any violation rolls back immediately (checked first).
+0. **Telemetry integrity** — the fail-safe root. If the fleet's metrics pipeline is
+   dark, stale-but-green numbers are *not* evidence of health: the gate **holds**
+   instead of promoting on unknown state, and a sustained outage escalates to a
+   rollback. A one-window blip recovers and the rollout continues.
+1. **Safety incidents** — terminal. Any violation rolls back immediately.
 2. **Robot task success rate** below floor → rollback.
 3. **Inference error rate** / **p99 latency** guardrails → rollback.
 4. **Cycle-time regression** → *hold* (wait and re-measure) rather than roll back; a
@@ -129,6 +138,34 @@ heuristic on any error.
 Set `ANTHROPIC_API_KEY` (or run `ant auth login`) and install `pip install -e .[llm]`
 to use the real model; force either path with `--force-llm` / `--force-heuristic`.
 
+### Deployment memory: the agent learns from history
+
+Pass `--memory deploy-history.json` and the engine keeps an append-only record of
+every deployment outcome. The agent consults it when planning:
+
+- recent rollbacks of a service **raise its risk score** (and the rationale says so),
+- a service whose *last* deployment rolled back gets a **5% bake-in step** prepended —
+  the cheapest possible probe before real traffic is at stake — and a low-risk change
+  that would have been blue/green is canaried instead,
+- a clean streak restores normal confidence.
+
+```
+Rationale: ... History: 100% of recent deployments of grasp-planner rolled back
+(breached: task_success_rate); raising risk accordingly. Last deployment of this
+service rolled back — prepending a 5% bake-in step before shifting real traffic.
+```
+
+### Soak (bake) gate: catching faults that pass every canary step
+
+The classic incident is the fault that *only* appears after full rollout — memory
+growth, thermal load, cache churn under sustained 100% traffic. After the last
+rollout step, the state machine enters a **SoakTest → EvaluateSoak** loop: the fleet
+bakes at 100% across multiple observation windows and every window re-runs the same
+decision tree. A late-activating breach is caught during the bake and rolled back
+*before* the candidate is finalized as the new baseline — turning a
+"promoted-then-fleet-wide-incident" into a contained, explained rollback. See
+`scenarios/late_latent_soak.yaml`.
+
 ---
 
 ## Faithful infrastructure, actually executed
@@ -153,9 +190,11 @@ decision tree enforces — the declarative and the agentic gate agree.
 
 | Scenario | Candidate behavior | Outcome |
 | --- | --- | --- |
-| `healthy_canary.yaml` | Small improvement across all signals | **Promoted** through 10→25→50→100% |
+| `healthy_canary.yaml` | Small improvement across all signals | **Promoted** through 10→25→50→100% + soak |
 | `regression_rollback.yaml` | Quality regression (task success + error rate) | **Rolled back** at 50% — before full-fleet exposure |
-| `safety_incident.yaml` | Healthy metrics but a **latent** safety fault at 50% | **Rolled back** on the safety signal (checked first) |
+| `safety_incident.yaml` | Healthy metrics but a **latent** safety fault at 50% | **Rolled back** on the safety signal |
+| `late_latent_soak.yaml` | Fault that activates only *after* full rollout | Passes every canary gate; **rolled back in soak** |
+| `telemetry_dropout.yaml` | Healthy candidate, but the metrics pipeline goes dark | **Holds** (fail-safe), then **rolled back** when telemetry doesn't recover |
 
 Scenarios are plain YAML: a `DeploymentRequest`, gate `thresholds`, and a
 `BehaviorProfile` describing how the candidate differs from the baseline (including a
@@ -181,11 +220,15 @@ Representative run (`--seeds 200 --seed 1234`, fully reproducible):
 Randomized rollouts : 200 (82 faulty candidates)
                        scripted baseline     agentic
 failed deployments                    82          19
-mean rollback (s)                  300.0        45.0
+mean rollback (s)                  300.0        46.9
 ------------------------------------------------------------
 Failed deployments   ↓ 76.8%
-Mean rollback time   ↓ 85.0%
+Mean rollback time   ↓ 84.4%
 ```
+
+Of the faulty candidates the agentic engine *does* let reach 100%, the late-activating
+ones are now caught by the **soak gate** and reverted — the scripted baseline promotes
+them and ships a fleet-wide incident.
 
 A *failed deployment* is a faulty candidate that reached **100% of the fleet** (a
 fleet-wide incident); *rollback time* is simulated seconds from breach to a safe state.
@@ -206,18 +249,19 @@ src/agentic_deploy/
   models.py         data model (DeploymentRequest, HealthSnapshot, Decision, ...)
   decision_tree.py  the promotion decision-tree engine  ← core idea
   agent.py          strategy planning + rollback reasoning (Claude / heuristic)
-  robotics_sim.py   seeded robot-fleet task-impact simulator
+  memory.py         deployment memory — plans learn from past outcomes
+  robotics_sim.py   seeded fleet simulator (latent/transient faults, telemetry loss)
   prometheus.py     health-signal provider + text exposition
   kubernetes.py     mock cluster: canary weight / blue-green cutover
   strategies.py     step → cluster-op adapters
   state_machine.py  minimal AWS Step Functions (ASL) interpreter
-  orchestrator.py   wires it all behind the state machine
-  cli.py            `agentic-deploy` entry point
+  orchestrator.py   wires it all behind the state machine (incl. the soak gate)
+  cli.py            `agentic-deploy` entry point (--memory for history-aware plans)
 deploy/             Dockerfile, k8s manifests, Step Functions ASL, Prometheus rules
-scenarios/          three end-to-end scenarios
+scenarios/          five end-to-end scenarios
 benchmarks/         reproducible baseline-vs-agentic benchmark
 examples/           run_demo.py — scripted walkthrough
-tests/              pytest suite (no API key required)
+tests/              pytest suite incl. industrial edge cases (no API key required)
 ```
 
 ---
@@ -230,8 +274,12 @@ pytest -q
 ```
 
 The suite covers the decision tree, the deterministic agent, the fleet simulator, the
-ASL interpreter, and full-scenario orchestration. It runs entirely offline — the agent
-tests exercise the heuristic path, so no credentials are needed.
+ASL interpreter, full-scenario orchestration, deployment memory, and a battery of
+**industrial edge cases**: sustained vs transient telemetry outages, faults that pass
+every canary gate (caught in soak), warm-up transients that hold-then-recover,
+persistent soft regressions that escalate, exact-boundary metric values, blue/green
+fault containment, and single-robot / zero-robot fleets. It runs entirely offline —
+the agent tests exercise the heuristic path, so no credentials are needed.
 
 ---
 

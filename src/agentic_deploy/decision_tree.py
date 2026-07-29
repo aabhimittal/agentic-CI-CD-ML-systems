@@ -85,6 +85,10 @@ def build_promotion_tree(thresholds: GateThresholds) -> Node:
 
     The tree encodes the safety-first ordering an SRE would use by hand:
 
+    0. **Telemetry integrity** is checked before anything else. If the window's
+       data is stale or missing, green numbers are not evidence of health — the
+       gate *holds* (fail-safe) instead of promoting on unknown state. Repeated
+       holds escalate to a rollback upstream.
     1. **Safety incidents** are terminal — any violation rolls back immediately.
     2. **Task success rate** is the robotics-specific health signal; below the
        floor is a rollback.
@@ -153,8 +157,8 @@ def build_promotion_tree(thresholds: GateThresholds) -> Node:
         if_false=error_node,
     )
 
-    # 1. Safety incidents — terminal, evaluated first.
-    root = Node(
+    # 1. Safety incidents — terminal, evaluated before any quality signal.
+    safety_node = Node(
         label="safety_incident",
         predicate=lambda s: s.safety_incidents > thresholds.max_safety_incidents,
         breach_signal="safety_incidents",
@@ -164,6 +168,21 @@ def build_promotion_tree(thresholds: GateThresholds) -> Node:
             reason="safety-envelope violation detected",
         ),
         if_false=task_node,
+    )
+
+    # 0. Telemetry integrity — the fail-safe root. Missing data must never read
+    # as healthy: hold rather than promote, and let hold-escalation roll back if
+    # telemetry doesn't recover.
+    root = Node(
+        label="telemetry_missing",
+        predicate=lambda s: not s.telemetry_ok,
+        breach_signal="telemetry_ok",
+        if_true=Node(
+            label="hold_telemetry",
+            verdict=Verdict.HOLD,
+            reason="fleet telemetry stale or missing; refusing to promote on unknown state",
+        ),
+        if_false=safety_node,
     )
     return root
 

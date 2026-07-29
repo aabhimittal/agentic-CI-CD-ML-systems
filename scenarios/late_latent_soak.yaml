@@ -1,0 +1,34 @@
+# A fault that only surfaces AFTER full rollout — the classic "it passed every
+# canary gate" incident. The regression activates at step 5, past the last canary
+# step (index 3), so every rollout gate promotes. The post-promotion SOAK gate
+# re-observes at 100% with a later step index, catches the breach during the bake
+# window, and rolls back before the candidate is finalized as the new baseline.
+service: grasp-planner
+model_version: grasp-net:v2.5.0
+previous_version: grasp-net:v2.4.2
+fleet_size: 70
+task_criticality: 0.8
+change_summary: "retrained weights; memory-leak regression under sustained full load"
+seed: 13
+
+thresholds:
+  max_error_rate: 0.05
+  max_latency_p99_ms: 500
+  min_task_success_rate: 0.90
+  max_cycle_time_s: 12.0
+  max_safety_incidents: 0
+
+behavior:
+  base_error_rate: 0.010
+  base_latency_p99_ms: 180
+  base_task_success_rate: 0.980
+  base_cycle_time_s: 8.0
+  # Under sustained full-fleet load the candidate degrades hard...
+  cand_error_rate: 0.120
+  cand_latency_p99_ms: 650
+  cand_task_success_rate: 0.850
+  cand_cycle_time_s: 10.0
+  cand_safety_rate: 0.0
+  # ...but only from step 5 — after the last canary gate (step 3) has passed.
+  regression_activates_at_step: 5
+  noise: 0.01

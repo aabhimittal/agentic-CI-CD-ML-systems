@@ -62,12 +62,18 @@ def _llm_available() -> bool:
 
 
 class Agent:
-    """Plans rollouts and reasons about rollbacks."""
+    """Plans rollouts and reasons about rollbacks.
 
-    def __init__(self, use_llm: bool | None = None, model: str = MODEL) -> None:
+    ``memory`` (a :class:`~agentic_deploy.memory.DeploymentMemory`) is optional;
+    when present, the agent's plans get more conservative for services with a
+    recent history of rollbacks.
+    """
+
+    def __init__(self, use_llm: bool | None = None, model: str = MODEL, memory=None) -> None:
         # ``None`` means auto-detect; callers (and tests) can force either path.
         self.use_llm = _llm_available() if use_llm is None else use_llm
         self.model = model
+        self.memory = memory
         self._client = None
         if self.use_llm:
             try:
@@ -88,9 +94,27 @@ class Agent:
         return self._plan_heuristic(request)
 
     def _plan_heuristic(self, request: DeploymentRequest) -> RolloutStrategyPlan:
-        """Rule-based planner. Deterministic given a request — safe for tests/CI."""
+        """Rule-based planner. Deterministic given a request (+memory) — safe for tests/CI."""
 
         risk = _risk_score(request)
+        history_note = ""
+
+        # Experience: services that recently rolled back get treated as riskier.
+        prior_failure_rate = 0.0
+        last_rolled_back = False
+        if self.memory is not None:
+            prior_failure_rate = self.memory.failure_rate(request.service)
+            last_rolled_back = self.memory.last_outcome(request.service) == "rolled_back"
+            if prior_failure_rate > 0.0:
+                risk = round(min(risk + 0.3 * prior_failure_rate, 1.0), 3)
+                breaches = self.memory.recent_breaches(request.service)
+                history_note = (
+                    f" History: {prior_failure_rate:.0%} of recent deployments of "
+                    f"{request.service} rolled back"
+                    + (f" (breached: {', '.join(breaches)})" if breaches else "")
+                    + "; raising risk accordingly."
+                )
+
         # High risk or safety-critical work → graduated canary to cap blast radius.
         # Low risk → atomic blue/green cutover for speed.
         if risk >= 0.5 or request.task_criticality >= 0.7:
@@ -109,11 +133,25 @@ class Agent:
                 f"Blue/green validates a parallel green stack, then cuts over "
                 f"atomically for a fast, reversible switch."
             )
+
+        # A service whose *last* deployment rolled back gets an extra 5% bake-in
+        # step — the cheapest possible probe before real traffic is at stake.
+        if last_rolled_back:
+            if strategy == RolloutStrategy.BLUE_GREEN:
+                strategy = RolloutStrategy.CANARY
+                traffic = [5.0, 25.0, 100.0]
+            elif traffic[0] > 5.0:
+                traffic = [5.0] + traffic
+            history_note += (
+                " Last deployment of this service rolled back — prepending a 5% "
+                "bake-in step before shifting real traffic."
+            )
+
         return RolloutStrategyPlan(
             strategy=strategy,
             steps=_steps_from_traffic(traffic, strategy),
             risk_score=risk,
-            rationale=rationale,
+            rationale=rationale + history_note,
             source="heuristic",
         )
 
@@ -124,10 +162,18 @@ class Agent:
             "You are a deployment strategist for an ML + robotics fleet CI/CD system. "
             "Choose between a graduated 'canary' rollout (safer, limits blast radius) "
             "and an atomic 'blue_green' cutover (faster, fully reversible). Favor canary "
-            "for high blast radius or safety-critical robot tasks. Return traffic_steps "
-            "as ordered candidate-traffic percentages ending at 100."
+            "for high blast radius or safety-critical robot tasks, and be more cautious "
+            "for services with a recent rollback history. Return traffic_steps as "
+            "ordered candidate-traffic percentages ending at 100."
         )
-        user = json.dumps(request.to_dict())
+        payload: dict[str, Any] = {"request": request.to_dict()}
+        if self.memory is not None:
+            payload["deployment_history"] = {
+                "failure_rate": self.memory.failure_rate(request.service),
+                "last_outcome": self.memory.last_outcome(request.service),
+                "recent_breaches": self.memory.recent_breaches(request.service),
+            }
+        user = json.dumps(payload)
         try:
             resp = self._client.messages.create(
                 model=self.model,
@@ -241,7 +287,12 @@ def _explain_heuristic(
     if breached:
         parts = []
         for sig in breached:
-            if sig in observed:
+            if sig == "telemetry_ok":
+                parts.append(
+                    "fleet telemetry was lost and did not recover within the hold "
+                    "budget (fail-safe: no promotion on unknown state)"
+                )
+            elif sig in observed:
                 val, bound = observed[sig]
                 parts.append(f"{sig}={val} (guardrail {bound})")
         detail = "; ".join(parts) if parts else ", ".join(breached)

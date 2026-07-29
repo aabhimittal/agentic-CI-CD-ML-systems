@@ -33,8 +33,9 @@ def test_safety_incident_is_terminal_rollback():
     decision = evaluate(tree, _snapshot(safety_incidents=1))
     assert decision.verdict == Verdict.ROLLBACK
     assert "safety_incidents" in decision.breached
-    # Safety is checked first, so it appears at the front of the path.
-    assert decision.path[0].startswith("safety_incident=")
+    # Safety is the first *health* check — right after the telemetry fail-safe.
+    assert decision.path[0].startswith("telemetry_missing=")
+    assert decision.path[1].startswith("safety_incident=")
 
 
 def test_task_success_below_floor_rolls_back():

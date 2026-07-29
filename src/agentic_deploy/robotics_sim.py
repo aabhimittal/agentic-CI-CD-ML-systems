@@ -45,8 +45,20 @@ class BehaviorProfile:
     # Expected safety-envelope violations per observation window at 100% candidate.
     cand_safety_rate: float = 0.0
 
-    # A latent regression can stay dormant until this step index (0 = active from start).
+    # Step/window indices below are *observation windows* — monotonic in time,
+    # advancing on every observation (including re-observations after a hold and
+    # post-promotion soak rounds).
+
+    # A latent regression stays dormant until this window (0 = active from start).
     regression_activates_at_step: int = 0
+
+    # A transient fault: the regression clears again from this window onward
+    # (-1 = permanent). Models warm-up effects like cache-cold cycle-time spikes.
+    regression_deactivates_at_step: int = -1
+
+    # Fleet telemetry is dark during these windows — the observation has
+    # stale/missing data. Industrially this must read as "unknown", never "healthy".
+    telemetry_dropout_steps: tuple[int, ...] = ()
 
     # Relative gaussian noise applied to each reading.
     noise: float = 0.02
@@ -54,7 +66,10 @@ class BehaviorProfile:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "BehaviorProfile":
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in known})
+        kwargs = {k: v for k, v in d.items() if k in known}
+        if "telemetry_dropout_steps" in kwargs:  # YAML gives a list; the field is a tuple
+            kwargs["telemetry_dropout_steps"] = tuple(kwargs["telemetry_dropout_steps"])
+        return cls(**kwargs)
 
 
 class FleetSimulator:
@@ -71,8 +86,27 @@ class FleetSimulator:
         p = self.profile
         frac = max(0.0, min(traffic_pct / 100.0, 1.0))
 
-        # A latent regression behaves like the baseline until it activates.
-        active = step_index >= p.regression_activates_at_step
+        # Telemetry dropout: the window has no trustworthy data. Freeze readings at
+        # the healthy baseline but mark them untrusted — the gate must not treat
+        # stale-but-green numbers as evidence of health.
+        if step_index in p.telemetry_dropout_steps:
+            return HealthSnapshot(
+                traffic_pct=traffic_pct,
+                service_error_rate=p.base_error_rate,
+                service_latency_p99_ms=p.base_latency_p99_ms,
+                task_success_rate=p.base_task_success_rate,
+                task_cycle_time_s=p.base_cycle_time_s,
+                safety_incidents=0,
+                telemetry_ok=False,
+                step_index=step_index,
+            )
+
+        # A latent regression behaves like the baseline until it activates, and a
+        # transient one (e.g. warm-up) clears again at deactivation.
+        active = step_index >= p.regression_activates_at_step and (
+            p.regression_deactivates_at_step < 0
+            or step_index < p.regression_deactivates_at_step
+        )
         cand_error = p.cand_error_rate if active else p.base_error_rate
         cand_latency = p.cand_latency_p99_ms if active else p.base_latency_p99_ms
         cand_success = p.cand_task_success_rate if active else p.base_task_success_rate

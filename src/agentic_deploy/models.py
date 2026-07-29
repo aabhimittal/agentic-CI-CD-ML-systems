@@ -55,6 +55,7 @@ class HealthSnapshot:
     task_success_rate: float       # fraction of robot tasks completed successfully (0..1)
     task_cycle_time_s: float       # mean seconds per robot task
     safety_incidents: int          # count of safety-envelope violations in the window
+    telemetry_ok: bool = True      # False when fleet telemetry is stale/lost this window
     step_index: int = 0
     timestamp: float = field(default_factory=time.time)
 
@@ -106,6 +107,7 @@ class RolloutStep:
     index: int
     traffic_pct: float
     dwell_seconds: float  # how long to observe before evaluating the gate
+    phase: str = "rollout"  # "rollout" | "soak" (post-100% bake observation)
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

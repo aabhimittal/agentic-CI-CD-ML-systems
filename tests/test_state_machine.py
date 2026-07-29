@@ -80,8 +80,10 @@ def test_shipped_asl_is_valid_and_loads():
     definition = json.loads(asl.read_text())
     # A no-op handler set is enough to validate the interpreter accepts the doc.
     handlers = {
-        r: (lambda ctx: {}) for r in ("plan_strategy", "provision", "rollout_step", "rollback", "promote")
+        r: (lambda ctx: {})
+        for r in ("plan_strategy", "provision", "rollout_step", "soak_test", "rollback", "promote")
     }
     sm = StateMachine(definition, handlers)
     assert sm.definition["StartAt"] == "PlanStrategy"
     assert "EvaluateGate" in sm.states
+    assert "SoakTest" in sm.states  # the post-promotion bake gate

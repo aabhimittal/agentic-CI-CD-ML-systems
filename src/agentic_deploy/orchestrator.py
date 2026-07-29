@@ -25,6 +25,7 @@ from .models import (
     Decision,
     DeploymentReport,
     DeploymentRequest,
+    RolloutStep,
     RolloutStrategyPlan,
     StepRecord,
     Verdict,
@@ -39,6 +40,12 @@ from . import strategies
 _ROLLBACK_DRAIN_SECONDS = 15.0
 # How many "hold" verdicts to tolerate on one step before escalating to rollback.
 _MAX_HOLDS = 2
+# Simulated bake time at 100% traffic before the candidate is finalized, and how
+# many observation windows the bake spans. Multiple windows matter: a fault that
+# needs sustained full-fleet load (thermal, memory growth, cache churn) may only
+# appear in the second window.
+_SOAK_SECONDS = 60.0
+_SOAK_ROUNDS = 2
 
 
 def _repo_root() -> Path:
@@ -69,6 +76,8 @@ class _RunState:
     report: DeploymentReport | None = None
     next_index: int = 0
     holds: int = 0
+    soak_rounds: int = 0
+    window: int = 0     # monotonic observation-window counter — time advances
     elapsed: float = 0.0
 
 
@@ -88,8 +97,11 @@ class Orchestrator:
         agent: Agent | None = None,
         seed: int = 0,
         k8s_dir: str | Path | None = None,
+        memory=None,
     ) -> DeploymentReport:
-        agent = agent or Agent()
+        # When a memory store is given without an explicit agent, build the agent
+        # around it so plans reflect the service's deployment history.
+        agent = agent or Agent(memory=memory)
         run = _RunState(
             request=request,
             agent=agent,
@@ -101,7 +113,10 @@ class Orchestrator:
         )
         machine = StateMachine(self.definition, self._handlers(run))
         execution = machine.run()
-        return self._finalize(run, execution)
+        report = self._finalize(run, execution)
+        if memory is not None:
+            memory.record(report)  # future plans for this service learn from this run
+        return report
 
     # ---- task handlers -----------------------------------------------------
 
@@ -110,6 +125,7 @@ class Orchestrator:
             "plan_strategy": lambda ctx: self._plan_strategy(run, ctx),
             "provision": lambda ctx: self._provision(run, ctx),
             "rollout_step": lambda ctx: self._rollout_step(run, ctx),
+            "soak_test": lambda ctx: self._soak_test(run, ctx),
             "rollback": lambda ctx: self._rollback(run, ctx),
             "promote": lambda ctx: self._promote(run, ctx),
         }
@@ -135,29 +151,10 @@ class Orchestrator:
 
         # 1. Shift traffic / cut over in the cluster.
         strategies.apply_step(run.cluster, run.plan.strategy, step)
-        run.elapsed += step.dwell_seconds
 
-        # 2. Observe fleet health and record it as Prometheus signals.
-        snapshot = run.simulator.observe(step.traffic_pct, step.index)
-        run.prometheus.record(snapshot)
-
-        # 3. Evaluate the promotion decision tree.
-        decision = evaluate(run.tree, snapshot)
-
-        # 4. Escalate a stuck "hold" to a rollback so we never loop forever.
-        if decision.verdict == Verdict.HOLD:
-            run.holds += 1
-            if run.holds > _MAX_HOLDS:
-                decision = Decision(
-                    verdict=Verdict.ROLLBACK,
-                    reason=f"held {run.holds - 1}x on this step without recovery; escalating to rollback",
-                    path=decision.path + ["[escalated→rollback]"],
-                    breached=decision.breached or ["task_cycle_time_s"],
-                )
-        else:
-            run.holds = 0
-
-        run.report.steps.append(StepRecord(step=step, snapshot=snapshot, decision=decision))
+        # 2-4. Observe, evaluate the tree, and apply hold-escalation (dwell time
+        # is accounted inside the gate).
+        decision = self._gate(run, step)
 
         # 5. Compute routing flags for the ASL Choice state.
         has_more = False
@@ -167,6 +164,66 @@ class Orchestrator:
                 has_more = True
         # On HOLD we re-run the same step (next_index unchanged); on ROLLBACK we stop.
         return {"verdict": str(decision.verdict), "has_more_steps": has_more}
+
+    def _soak_test(self, run: _RunState, ctx: dict[str, Any]) -> dict[str, Any]:
+        """Bake at 100%: re-observe after full rollout to catch late-activating faults.
+
+        Every gate promoted, so the whole fleet now runs the candidate — but a
+        latent fault can surface only after full exposure (thermal load, cache
+        churn, rare SKUs). The soak observes at a *later* step index so such
+        faults activate, and routes through the same decision tree. Holds re-soak
+        with the same escalation cap as rollout steps.
+        """
+
+        assert run.plan is not None and run.report is not None
+        last_index = run.plan.steps[-1].index
+        soak_step = RolloutStep(
+            index=last_index + 1 + run.soak_rounds,
+            traffic_pct=100.0,
+            dwell_seconds=_SOAK_SECONDS,
+            phase="soak",
+        )
+        run.soak_rounds += 1
+        decision = self._gate(run, soak_step)
+        return {
+            "verdict": str(decision.verdict),
+            "has_more_steps": False,
+            "soak_complete": run.soak_rounds >= _SOAK_ROUNDS,
+        }
+
+    def _gate(self, run: _RunState, step: RolloutStep) -> Decision:
+        """Shared gate: observe fleet health, evaluate the tree, escalate stuck holds.
+
+        Observations are keyed by a monotonic *window* counter, not the step
+        index: time advances with every observation, including re-observations
+        after a hold and soak rounds. That is what lets transient conditions
+        (telemetry outages, warm-up spikes) genuinely recover — and latent
+        faults genuinely activate — while a step is being re-measured.
+        """
+
+        assert run.report is not None
+        run.elapsed += step.dwell_seconds
+
+        snapshot = run.simulator.observe(step.traffic_pct, run.window)
+        run.window += 1
+        run.prometheus.record(snapshot)
+        decision = evaluate(run.tree, snapshot)
+
+        # Escalate a stuck "hold" to a rollback so we never loop forever.
+        if decision.verdict == Verdict.HOLD:
+            run.holds += 1
+            if run.holds > _MAX_HOLDS:
+                decision = Decision(
+                    verdict=Verdict.ROLLBACK,
+                    reason=f"held {run.holds - 1}x without recovery; escalating to rollback",
+                    path=decision.path + ["[escalated→rollback]"],
+                    breached=decision.breached or ["task_cycle_time_s"],
+                )
+        else:
+            run.holds = 0
+
+        run.report.steps.append(StepRecord(step=step, snapshot=snapshot, decision=decision))
+        return decision
 
     def _rollback(self, run: _RunState, ctx: dict[str, Any]) -> dict[str, Any]:
         assert run.report is not None
@@ -208,9 +265,10 @@ def deploy(
     seed: int = 0,
     asl_path: str | Path | None = None,
     k8s_dir: str | Path | None = None,
+    memory=None,
 ) -> DeploymentReport:
     """Convenience wrapper: build an Orchestrator and run one deployment."""
 
     return Orchestrator(asl_path=asl_path).deploy(
-        request, profile, agent=agent, seed=seed, k8s_dir=k8s_dir
+        request, profile, agent=agent, seed=seed, k8s_dir=k8s_dir, memory=memory
     )
