@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install
+        run: pip install -e .[dev]
+      - name: Unit + edge-case tests (offline, no API key)
+        run: pytest -q
+
+  validate-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e .
+      - name: Step Functions ASL parses
+        run: python -c "import json; json.load(open('deploy/stepfunctions/deployment.asl.json'))"
+      - name: Kubernetes manifests parse
+        run: python -c "import yaml,glob; [list(yaml.safe_load_all(open(f))) for f in glob.glob('deploy/k8s/*.yaml')]"
+      - name: Prometheus rules parse
+        run: python -c "import yaml; yaml.safe_load(open('deploy/prometheus/rules.yaml'))"
+      - name: Scenarios run with expected outcomes
+        run: |
+          set -e
+          agentic-deploy run scenarios/healthy_canary.yaml --force-heuristic > /dev/null
+          for s in regression_rollback safety_incident late_latent_soak telemetry_dropout; do
+            if agentic-deploy run "scenarios/$s.yaml" --force-heuristic > /dev/null; then
+              echo "$s unexpectedly promoted"; exit 1
+            fi
+          done
+      - name: Benchmark runs
+        run: python benchmarks/benchmark.py --seeds 50 --json > /dev/null
