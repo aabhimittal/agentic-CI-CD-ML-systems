@@ -5,6 +5,7 @@ Public surface: the data model plus the high-level orchestrator entry point.
 
 from __future__ import annotations
 
+from .memory import DeploymentMemory
 from .models import (
     Decision,
     DeploymentReport,
@@ -20,6 +21,7 @@ from .models import (
 
 __all__ = [
     "Decision",
+    "DeploymentMemory",
     "DeploymentReport",
     "DeploymentRequest",
     "GateThresholds",
@@ -31,4 +33,4 @@ __all__ = [
     "Verdict",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

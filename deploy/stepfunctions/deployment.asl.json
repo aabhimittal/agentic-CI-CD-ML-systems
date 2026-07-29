@@ -1,5 +1,5 @@
 {
-  "Comment": "Agentic ML+Robotics deployment: plan a strategy, provision the green stack, then run a gated rollout loop. Each step observes fleet health and a decision tree returns promote/hold/rollback. Health guardrail breaches route to an atomic rollback; a clean run promotes the candidate.",
+  "Comment": "Agentic ML+Robotics deployment: plan a strategy, provision the green stack, then run a gated rollout loop. Each step observes fleet health and a decision tree returns promote/hold/rollback. After the final step a soak (bake) gate re-observes at 100% to catch late-activating faults before the candidate is finalized. Health guardrail breaches route to an atomic rollback; a clean run promotes the candidate.",
   "StartAt": "PlanStrategy",
   "States": {
     "PlanStrategy": {
@@ -40,6 +40,36 @@
             { "Variable": "$.has_more_steps", "BooleanEquals": true }
           ],
           "Next": "RolloutStep"
+        }
+      ],
+      "Default": "SoakTest"
+    },
+    "SoakTest": {
+      "Type": "Task",
+      "Resource": "soak_test",
+      "Comment": "Bake at 100%: re-observe fleet health after full traffic to catch late-activating faults before finalizing.",
+      "Next": "EvaluateSoak"
+    },
+    "EvaluateSoak": {
+      "Type": "Choice",
+      "Comment": "Route on the soak verdict; holds and incomplete bake windows re-soak (holds escalate), breaches roll back.",
+      "Choices": [
+        {
+          "Variable": "$.verdict",
+          "StringEquals": "rollback",
+          "Next": "Rollback"
+        },
+        {
+          "Variable": "$.verdict",
+          "StringEquals": "hold",
+          "Next": "SoakTest"
+        },
+        {
+          "And": [
+            { "Variable": "$.verdict", "StringEquals": "promote" },
+            { "Variable": "$.soak_complete", "BooleanEquals": false }
+          ],
+          "Next": "SoakTest"
         }
       ],
       "Default": "Promote"

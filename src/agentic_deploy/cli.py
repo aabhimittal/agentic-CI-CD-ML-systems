@@ -47,12 +47,12 @@ def load_scenario(path: str | Path) -> tuple[DeploymentRequest, BehaviorProfile,
     return request, profile, seed
 
 
-def _make_agent(args: argparse.Namespace) -> Agent:
+def _make_agent(args: argparse.Namespace, memory=None) -> Agent:
     if getattr(args, "force_heuristic", False):
-        return Agent(use_llm=False)
+        return Agent(use_llm=False, memory=memory)
     if getattr(args, "force_llm", False):
-        return Agent(use_llm=True)
-    return Agent()
+        return Agent(use_llm=True, memory=memory)
+    return Agent(memory=memory)
 
 
 # ---- rendering -------------------------------------------------------------
@@ -70,11 +70,13 @@ def _render_plain(report: DeploymentReport) -> str:
     out.append("-" * 72)
     for rec in report.steps:
         s, d = rec.snapshot, rec.decision
+        label = "soak  " if rec.step.phase == "soak" else f"step {rec.step.index}"
+        telemetry = "" if s.telemetry_ok else "  TELEMETRY-LOST"
         out.append(
-            f"step {rec.step.index}  traffic={s.traffic_pct:>5.0f}%  "
+            f"{label}  traffic={s.traffic_pct:>5.0f}%  "
             f"err={s.service_error_rate:.3f}  p99={s.service_latency_p99_ms:>5.0f}ms  "
             f"task_ok={s.task_success_rate:.3f}  cycle={s.task_cycle_time_s:.1f}s  "
-            f"safety={s.safety_incidents}  →  {str(d.verdict).upper()}"
+            f"safety={s.safety_incidents}{telemetry}  →  {str(d.verdict).upper()}"
         )
         out.append(f"          tree: {' / '.join(d.path)}")
         if d.breached:
@@ -113,7 +115,7 @@ def _render_rich(report: DeploymentReport) -> bool:
         s, d = rec.snapshot, rec.decision
         color = {"promote": "green", "hold": "yellow", "rollback": "red"}.get(str(d.verdict), "white")
         table.add_row(
-            str(rec.step.index),
+            "soak" if rec.step.phase == "soak" else str(rec.step.index),
             f"{s.traffic_pct:.0f}%",
             f"{s.service_error_rate:.3f}",
             f"{s.service_latency_p99_ms:.0f}",
@@ -150,8 +152,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     request, profile, seed = load_scenario(args.scenario)
     if args.seed is not None:
         seed = args.seed
+    memory = None
+    if args.memory:
+        from .memory import DeploymentMemory
+
+        memory = DeploymentMemory(args.memory)
     report = Orchestrator(asl_path=args.asl).deploy(
-        request, profile, agent=_make_agent(args), seed=seed
+        request, profile, agent=_make_agent(args, memory), seed=seed, memory=memory
     )
     _emit(report, args.json)
     # Exit non-zero on rollback so CI pipelines can gate on it.
@@ -182,6 +189,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--asl", default=None, help="override the Step Functions ASL path")
     run.add_argument("--force-heuristic", action="store_true", help="never call the LLM")
     run.add_argument("--force-llm", action="store_true", help="require the LLM agent")
+    run.add_argument(
+        "--memory",
+        default=None,
+        metavar="PATH",
+        help="JSON deployment-memory store; plans get more cautious after rollbacks",
+    )
     run.set_defaults(func=_cmd_run)
 
     tree = sub.add_parser("tree", help="render the promotion decision tree for a scenario")
